@@ -1,0 +1,591 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DevOps stack to create CodeCommit CodeBuild CodePipleline and ECR.  
+
+Parameters:
+  AppName:
+    Type: String
+    Description: Name of the application
+    Default: AXA-Demo-app
+  BuildAppName:
+    Type: String
+    Description: Name of the application
+    Default: CodeBuildApp
+  CommitStackName:
+    Type: String
+    Description: Name of the Code Commit repository
+    Default: demo-stack
+  CodeCommitRepoName:
+    Type: String
+    Description: CodeCommit Repository Name
+    Default: demo_repo
+  ECRRegistryName:
+    Type: String
+    Description: ECR Registry Name
+    Default: demo_registry
+  BuildStackName:
+    Type: String
+    Description: Name of the Code Build Stack #with nested stack name is dynamic hence defined here for consistency
+    Default: codebuild-stack
+  AppBranch:
+    Type: String
+    Description: Branch name of the application on Code Commit
+    Default: master
+  BuckerPrefix:
+    Type: String
+    Description: Outuput Bucket Prefix 
+    Default: build-output-demo-
+  BuildSize:
+    Type: String
+    Description: Build Environment Compute Types
+    Default: BUILD_GENERAL1_SMALL
+    AllowedValues:
+    - BUILD_GENERAL1_SMALL   # 3 GB memory and 2 vCPU
+    - BUILD_GENERAL1_MEDIUM  # 7 GB memory and 4 vCPUs
+    - BUILD_GENERAL1_LARGE   # 15 GB memory and 8 vCPUs
+  BuildImage:
+    Type: String
+    Description: Build Image Environemnt Types
+    Default: aws/codebuild/docker:17.09.0
+    AllowedValues:   #  Default images supported
+    - aws/codebuild/amazonlinux2-x86_64-standard:3.0
+    - aws/codebuild/amazonlinux2-x86_64-standard:2.0
+    - aws/codebuild/amazonlinux2-aarch64-standard:1.0
+    - aws/codebuild/standard:2.0
+    - aws/codebuild/standard:3.0
+    - aws/codebuild/standard:4.0
+    - aws/codebuild/docker:17.09.0
+  
+Resources:
+  DemoRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: 
+        Ref: CodeCommitRepoName
+      RepositoryDescription: Demo repository 
+      # Code: 
+      #   S3: #sg/demo-repo.zip
+      #      #Bucket: demo-bucket-sg #!Sub '${AWS::Region}'
+      #      Bucket: demo-bucket-sg'
+      #      Key: demo-repo.zip 
+
+  ECRregistry: 
+    Type: 'AWS::ECR::Repository' 
+    Properties: 
+      RepositoryName: demo-repo 
+
+  CodeBuildTrustRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Sid: '1'
+          Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+
+  # Create Policy to allow logs and S3 and attach to codebuild trust role
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: S3BuildBucket
+    Properties:
+      PolicyName: CodeBuildPolicy
+      PolicyDocument:
+        Statement:
+        - Action:
+          - ecr:*
+          Resource:
+          - "*"
+          Effect: Allow
+        - Effect: Allow
+          Resource:
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:logs:'
+              - Ref: AWS::Region
+              - ":"
+              - Ref: AWS::AccountId
+              - ":log-group:/aws/codebuild/"
+              - Ref: AppName  
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:logs:'
+              - Ref: AWS::Region
+              - ":"
+              - Ref: AWS::AccountId
+              - ":log-group:/aws/codebuild/"
+              - Ref: AppName
+              - ":*"
+          - Fn::Join:  # Added Build application permission
+            - ''
+            - - 'arn:aws:logs:'
+              - Ref: AWS::Region
+              - ":"
+              - Ref: AWS::AccountId
+              - ":log-group:/aws/codebuild/"
+              - Ref: AppName  
+              - '-BuildApp'
+          - Fn::Join:
+            - ''
+            - - 'arn:aws:logs:'
+              - Ref: AWS::Region
+              - ":"
+              - Ref: AWS::AccountId
+              - ":log-group:/aws/codebuild/"
+              - Ref: AppName
+              - "-BuildApp:*"
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+        - Effect: Allow
+          Resource:
+            - Fn::GetAtt:
+              - S3BuildBucket
+              - Arn
+            - Fn::Join:
+                - ''
+                - - Fn::GetAtt:
+                      - S3BuildBucket
+                      - Arn
+                  - "/*"
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:GetObjectVersion
+          # - s3:GetBucketAcl
+          # - s3:GetBucketLocation
+        - Effect: Allow   # Allow code build access to code commit 
+          Resource:
+           - Fn::GetAtt:
+              - DemoRepo
+              - Arn
+          Action:
+          - codecommit:GitPull
+        - Effect: Allow  
+          Resource:
+            - Fn::Join:
+              - ''
+              - - 'arn:aws:codebuild:'
+                - Ref: AWS::Region
+                - ":"
+                - Ref: AWS::AccountId
+                - ":report-group/"  
+                - Ref: AppName
+                - "-*"
+          Action:
+            - codebuild:CreateReportGroup
+            - codebuild:CreateReport
+            - codebuild:UpdateReport
+            - codebuild:BatchPutTestCases  
+      Roles:
+      - Ref: CodeBuildTrustRole
+
+    # Create S3 Bucket for build artefacts
+  S3BuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Join:
+        - ''
+        - - Ref: BuckerPrefix   
+          - Ref: AWS::Region
+          - "-"
+          - Ref: AWS::AccountId
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+      - Key: Name
+        Value: 
+          Fn::Sub: ${AppName}-BuildOutputBucket
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${AppName}-BuildApp
+      Description: Code Build project
+      ServiceRole:
+        Fn::GetAtt:
+        - CodeBuildTrustRole
+        - Arn
+      Artifacts:
+        Type: S3
+        Location: 
+          Ref: S3BuildBucket
+      Environment:
+        Type: "LINUX_CONTAINER"
+        ComputeType:
+          Ref: BuildSize
+        Image:
+          Ref: BuildImage
+        EnvironmentVariables: []
+      Source:
+        Type: CODECOMMIT
+        Location:  
+          Fn::GetAtt:
+            - DemoRepo
+            - CloneUrlHttp
+      SourceVersion: 
+        Ref: AppBranch
+      TimeoutInMinutes: 30
+
+    
+  CodePipelineTrustRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Sid: '1'
+          Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      
+  # Policy for the trust role
+  CodePipelineRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodePipelinePolicy
+      PolicyDocument:
+        Statement:
+        - Action:
+          - s3:*
+          Resource:
+          - "*"
+          Effect: Allow
+        - Action:
+          - s3:PutBucketPolicy
+          - s3:PutObject
+          Resource:
+          - Fn::Join:
+            - ''
+            - - Fn::ImportValue:
+                  Fn::Sub: "${BuildStackName}-BuildBucketArn"
+          Effect: Allow
+        - Action:
+          - codecommit:GetBranch
+          - codecommit:GetCommit
+          - codecommit:UploadArchive
+          - codecommit:GetUploadArchiveStatus
+          - codecommit:CancelUploadArchive
+          Resource: "*"
+          Effect: Allow
+        - Action:
+          - codepipeline:*
+          - iam:ListRoles
+          - iam:PassRole
+          - codedeploy:CreateDeployment
+          - codedeploy:GetApplicationRevision
+          - codedeploy:GetDeployment
+          - codedeploy:GetDeploymentConfig
+          - codedeploy:RegisterApplicationRevision
+          - elasticbeanstalk:DescribeApplications
+          - elasticbeanstalk:DescribeEnvironments
+          - lambda:GetFunctionConfiguration
+          - lambda:ListFunctions
+          Resource: "*"
+          Effect: Allow
+        - Action:
+          - codebuild:StartBuild
+          - codebuild:StopBuild
+          - codebuild:BatchGet*
+          - codebuild:Get*
+          - codebuild:List*
+          - codecommit:GetBranch
+          - codecommit:GetCommit
+          - codecommit:GetRepository
+          - codecommit:ListBranches
+          - s3:GetBucketLocation
+          - s3:ListAllMyBuckets
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - logs:GetLogEvents
+          Effect: Allow
+          Resource: arn:aws:logs:*:*:log-group:/aws/codebuild/*:log-stream:*
+        - Action:
+          - lambda:*
+          Resource:
+          - "*"
+          Effect: Allow
+      Roles:
+      - Ref: CodePipelineTrustRole
+
+
+  AxaCodePipelineRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodePipelinePolicy
+      PolicyDocument:
+        Statement:
+        - Action:
+          - s3:*
+          Resource:
+          - "*"
+          Effect: Allow
+        - Action:
+          - lambda:*
+          Resource:
+          - "*"
+          Effect: Allow
+        # - Action:
+        #   - sns:*
+        #   Resource:
+        #   - Fn::Join:
+        #     - ''
+        #     - - Fn::ImportValue:
+        #           Fn::Sub: ${CommitStackName}-SNSTopicARN
+        #   Effect: Allow
+        - Action:
+          - s3:PutBucketPolicy
+          - s3:PutObject
+          Resource:
+          - Fn::GetAtt:
+              - S3BuildBucket
+              - Arn
+          Effect: Allow
+        - Action:
+          - codecommit:GetBranch
+          - codecommit:GetCommit
+          - codecommit:UploadArchive
+          - codecommit:GetUploadArchiveStatus
+          - codecommit:CancelUploadArchive
+          Resource: "*"
+          Effect: Allow
+        - Action:
+          - codepipeline:*
+          - iam:ListRoles
+          - iam:PassRole
+          - codedeploy:CreateDeployment
+          - codedeploy:GetApplicationRevision
+          - codedeploy:GetDeployment
+          - codedeploy:GetDeploymentConfig
+          - codedeploy:RegisterApplicationRevision
+          - elasticbeanstalk:DescribeApplications
+          - elasticbeanstalk:DescribeEnvironments
+          - lambda:GetFunctionConfiguration
+          - lambda:ListFunctions
+          Resource: "*"
+          Effect: Allow
+        - Action:
+          - codebuild:StartBuild
+          - codebuild:StopBuild
+          - codebuild:BatchGet*
+          - codebuild:Get*
+          - codebuild:List*
+          - codecommit:GetBranch
+          - codecommit:GetCommit
+          - codecommit:GetRepository
+          - codecommit:ListBranches
+          - s3:GetBucketLocation
+          - s3:ListAllMyBuckets
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - logs:GetLogEvents
+          Effect: Allow
+          Resource: arn:aws:logs:*:*:log-group:/aws/codebuild/*:log-stream:*
+      Roles:
+      - Ref: CodePipelineTrustRole
+
+  # Create a pipeline
+  MyPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name:
+        Fn::Join:
+        - ''
+        - - Ref: AppName
+          - "-Pipeline"
+      RoleArn:
+        Fn::GetAtt:
+        - CodePipelineTrustRole
+        - Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::Join:
+          - ''
+          - - Ref: BuckerPrefix   
+            - Ref: AWS::Region
+            - "-"
+            - Ref: AWS::AccountId
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: ApplicationSource
+          InputArtifacts: []
+          ActionTypeId:  
+            Version: '1'
+            Category: Source  # Allowed values - Source, Build, Test, Deploy, Invoke, Approval
+            Owner: AWS
+            Provider: CodeCommit
+          Configuration:
+            RepositoryName:
+              Fn::GetAtt:
+              - DemoRepo
+              - Name
+            BranchName:
+              Ref: AppBranch
+          OutputArtifacts:
+          - Name:
+              Fn::Join:
+              - ''
+              - - Ref: AppName
+                - "-SourceArtifact"
+          RunOrder: 1
+
+      - Name: Build
+        Actions:
+        - Name: ApplicationBuild
+          InputArtifacts:
+          - Name:
+              Fn::Join:
+              - ''
+              - - Ref: AppName
+                - "-SourceArtifact"
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          OutputArtifacts:
+          - Name:
+              Fn::Join:
+              - ''
+              - - Ref: AppName
+                - "-BuiltArtifact"
+          Configuration:
+            ProjectName: 
+                 Fn::Sub: ${AppName}-BuildApp
+          RunOrder: 1
+
+      - Name: StartTraining
+        Actions:
+        - Name: TriggerLambda
+          InputArtifacts: []
+          ActionTypeId:  
+            Version: '1'
+            Category: Invoke 
+            Owner: AWS
+            Provider: Lambda
+          Configuration:
+            FunctionName:
+              Ref: StartTraining
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'LambdaExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Effect: 'Allow'
+          Principal:
+            Service:
+              - 'lambda.amazonaws.com'
+          Action:
+            - 'sts:AssumeRole'
+      Path: '/'
+
+  CodePipelineRolePolicies:
+    DependsOn: LambdaExecutionRole
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodePipelinePolicy
+      PolicyDocument:
+        Statement:
+        - Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          - codepipeline:PutJobSuccessResult
+          - codepipeline:PutJobFailureResult
+          Resource:
+          - "*"
+          Effect: Allow
+      Roles:
+      - Ref: LambdaExecutionRole
+
+  StartTraining:     
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: 'Function to start step function'
+      FunctionName: 'StartTrainingJob'
+      Handler: 'index.handler'
+      MemorySize: 256
+      Role:
+        Fn::GetAtt:
+          - 'LambdaExecutionRole'
+          - 'Arn'
+      Runtime: 'python3.6'
+      Timeout: 120
+      Code:
+        ZipFile: >
+          import json
+          import boto3
+          import time
+
+          client = boto3.client('stepfunctions')  
+
+          def lambda_handler(event, context):
+              exec_name = 'axacicd{}'.format(time.strftime("%Y%m%d%H%M%S", time.gmtime()))
+              input_datafd = {"Comment": "Insert your JSON here"}
+              response = client.start_execution(stateMachineArn='arn:aws:states:us-east-1:507786327009:stateMachine:MyStateMachine',
+                                                  name=exec_name,
+                                                  input= json.dumps(input_datafd))
+              
+              return {
+                  'statusCode': 200,
+                  'body': 'Started'
+              }
+
+Outputs:
+    # Export Reporistory Name
+    RepoName:
+      Description:  Repository Name
+      Value:
+        Fn::GetAtt:
+          - DemoRepo
+          - Name
+      Export:
+        Name:
+          Fn::Sub: "${CommitStackName}-DemoRepo"
+        
+    # Export Registry ARN
+    ECRARN:
+      Description:  ECR Registry ARN Name
+      Value:
+        Fn::GetAtt:
+          - ECRregistry
+          - Arn
+      Export:
+        Name:
+          Fn::Sub: "${CommitStackName}-RepoARN"
+ 
+    CloneUrlHttp:
+      Description: Address of database endpoint
+      Value:
+        Fn::GetAtt:
+        - DemoRepo
+        - CloneUrlHttp
+      Export:
+        Name:
+          Fn::Sub: "${CommitStackName}-CloneUrlHttp"
+
+    CloneUrlSsh:
+      Description: Address of database endpoint
+      Value:
+        Fn::GetAtt:
+        - DemoRepo
+        - CloneUrlSsh
+      Export:
+        Name:
+          Fn::Sub: "${CommitStackName}-CloneUrlSsh"
+ 

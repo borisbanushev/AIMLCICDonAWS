@@ -1,0 +1,89 @@
+{
+  "StartAt": "StartTrainingJob",
+  "States": {
+      "StartTrainingJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:507786327009:function:bbb-lambdaModelTrain",
+              "ResultPath": "$",
+              "Next": "CheckStatusTraining"
+            },
+            "CheckStatusTraining": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:507786327009:function:bbb-lambdaModelAwait",
+              "ResultPath": "$",
+              "Next": "CheckTrainingBranch"
+            },
+        "CheckTrainingBranch": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "Completed"
+                    }
+                   ],
+                  "Next": "StartDeployment"
+                },
+                {
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "InProgress"
+                    }
+                  ],
+                  "Next": "WaitStatusTraining"
+                }
+              ]
+            },
+
+            "WaitStatusTraining": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckStatusTraining"
+            },
+
+            "StartDeployment": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:507786327009:function:bbb-lambdaModelDeploy",
+              "Next": "CheckStatusDeployment"
+            },
+            "CheckStatusDeployment": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:507786327009:function:bbb-lambdaModelAwait",
+              "ResultPath": "$",
+              "Next": "CheckDeploymentBranch"
+            },
+
+            "CheckDeploymentBranch": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "Creating"
+                    }
+                   ],
+                  "Next": "WaitStatusDeployment"
+                },
+                {
+                  "Or": [{
+                      "Variable": "$.status",
+                      "StringEquals": "InService"
+                    }
+                  ],
+                  "Next": "StartPrediction"
+                }
+              ]
+            },
+            "WaitStatusDeployment": {
+              "Type": "Wait",
+              "Seconds": 60,
+              "Next": "CheckStatusDeployment"
+            },
+            "StartPrediction": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:507786327009:function:bbb-lambdaModelPredict",
+              "End": true
+            }
+          }
+        }
+
